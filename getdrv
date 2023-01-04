@@ -1,0 +1,87 @@
+#!/bin/bash
+
+sys_walk_drv_get()
+{
+	local driver_path driver device_path modalias
+	device_path="$1"
+
+	while [ "${device_path}" != "/sys" ]; do
+
+		# current driver
+		driver_path="${device_path}/driver"
+		if [ -e "$driver_path" ]; then
+			if [ -e "$driver_path/module" ]; then
+				driver="$(basename "$(readlink -f "$driver_path/module")")"
+			else
+				driver="$(basename "$(readlink -f "$driver_path")")"
+			fi
+
+			if [ -n "${driver}" ]; then
+				echo "${driver}"
+			fi
+		fi
+
+		device_path="$(dirname "${device_path}")"
+	done
+}
+
+dev_sys_walk_drv_get()
+{
+	local dev_sys_path disk_sys_path component
+
+	dev_type="$1"
+	# Resolve symlink so sys_walk_drv_get can walk up the hierarchy
+	dev_sys_path="$(readlink -f "$2")"
+
+	if [ "$dev_type" == "block" ]; then
+		# Find whole disk from partition
+		if grep -q "^DEVTYPE=partition$" "$dev_sys_path/uevent"; then
+			disk_sys_path="$dev_sys_path/.."
+		else
+			disk_sys_path="$dev_sys_path"
+		fi
+
+		# Iterate over component of a layered device
+		if [ -e "$disk_sys_path/slaves" ]; then
+			find "$disk_sys_path/slaves" -mindepth 1 -maxdepth 1 | while read -r component; do
+				dev_sys_walk_drv_get "$component"
+			done
+		fi
+	fi
+
+	sys_walk_drv_get "${dev_sys_path}"
+}
+
+dev_drv_get()
+{
+	local dev_node dev_type dev_num dev_sys_path
+	dev_node="$1"
+
+	if [ ! -e "$dev_node" ]; then
+		echo "device ${dev_node} missing" >&2
+		exit 1
+	fi
+
+	dev_type=`stat -L -c %F "${dev_node}" | awk '{print $1}'`
+	if [ "${dev_type}"  == "character" ]; then
+		dev_type="char"
+	elif [ "${dev_type}" != "block" ]; then
+		echo "${dev_node} is not a block or char dev file" >&2
+		exit 1
+	fi
+
+# Look up device number and convert to decimal as it appears in sysfs
+	dev_num="$(stat -L -c %t:%T "$dev_node")"
+	dev_num="$((0x${dev_num%:*})):$((0x${dev_num#*:}))"
+
+	# Look up device in sysfs
+	dev_sys_path="/sys/dev/$dev_type/$dev_num"
+	if [ ! -d "$dev_sys_path" ]; then
+		echo "device ${dev_node} missing ${dev_sys_path}" >&2
+		exit 1
+	fi
+
+	dev_sys_walk_drv_get "$dev_type" "$dev_sys_path"
+}
+
+dev_drv_get $1
